@@ -229,6 +229,12 @@ def main(
     model.eval()
     file = open('/workspace/GAMA/GAMMA-data-models/fs/nexus-projects/brain_project/acl_sk_24/CompA-R-test.json','r')
     base_path_audios = "/workspace/GAMA/GAMMA-data-models/fs/nexus-projects/brain_project/acl_sk_24/filtered_audios/"
+
+###### here to modify and add dynamic SUPERB style.... start checking one task ######
+  
+  # dynamic superb tasks...
+  # /livingrooms/wcchen/DynamicSUPERB_Tasks/
+
     file = json.load(file)
     res = []
     for i in tqdm(file):
@@ -240,7 +246,7 @@ def main(
             inputs = tokenizer(prompt, return_tensors="pt")
             input_ids = inputs["input_ids"].to(device)
             if audio_path != 'empty':
-                cur_audio_input = load_audio(base_path_audios + audio_path).unsqueeze(0)
+                cur_audio_input = load_audio(base_path_audios + audio_path).unsqueeze(0).to("cuda")
                 if torch.cuda.is_available() == False:
                     pass
                 else:
@@ -279,7 +285,7 @@ def main(
             # print(output)
             tmp['audio_id'] = audio_path
             tmp['instruction'] = instruction
-            tmp['scene_caption'] = i['caption']
+            #tmp['scene_caption'] = i['caption']
             tmp['prediction'] = output
             tmp['timestamp_events'] = i['timestamp_events']
             tmp['ref'] = j["output"]
