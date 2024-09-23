@@ -186,7 +186,7 @@ def load_audio(filename):
 
 
 def main(
-    base_model: str = "/fs/nexus-projects/brain_project/Llama-2-7b-chat-hf-qformer",
+    base_model: str = "/workspace/GAMA/GAMMA-data-models/fs/nexus-projects/brain_project/Llama-2-7b-chat-hf-qformer",
     prompt_template: str = "alpaca_short",  # The prompt template to use, will default to alpaca.
 ):
     base_model = base_model or os.environ.get("BASE_MODEL", "")
@@ -194,6 +194,7 @@ def main(
         base_model
     ), "Please specify a --base_model, e.g. --base_model='huggyllama/llama-7b'"
 
+    print(f"base_model is {base_model}")
     prompter = Prompter(prompt_template)
     tokenizer = LlamaTokenizer.from_pretrained(base_model)
 
@@ -213,7 +214,7 @@ def main(
     model = get_peft_model(model, config)
     temp, top_p, top_k = 0.1, 0.95, 500
     # change it to your model path
-    eval_mdl_path = '/fs/gamma-projects/audio/gama/new_data/stage5/checkpoint-2500/pytorch_model.bin'
+    eval_mdl_path = '/workspace/GAMA/GAMMA-data-models/checkpoint-1100/pytorch_model.bin' #location on singularity image of the bin model.
     state_dict = torch.load(eval_mdl_path, map_location='cpu')
     msg = model.load_state_dict(state_dict, strict=False)
 
@@ -226,7 +227,8 @@ def main(
     model.config.eos_token_id = 2
 
     model.eval()
-    file = open('/fs/nexus-projects/brain_project/acl_sk_24/GAMA_Benchmark_new.json','r')
+    file = open('/workspace/GAMA/GAMMA-data-models/fs/nexus-projects/brain_project/acl_sk_24/CompA-R-test.json','r')
+    base_path_audios = "/workspace/GAMA/GAMMA-data-models/fs/nexus-projects/brain_project/acl_sk_24/filtered_audios/"
     file = json.load(file)
     res = []
     for i in tqdm(file):
@@ -238,7 +240,7 @@ def main(
             inputs = tokenizer(prompt, return_tensors="pt")
             input_ids = inputs["input_ids"].to(device)
             if audio_path != 'empty':
-                cur_audio_input = load_audio(audio_path).unsqueeze(0)
+                cur_audio_input = load_audio(base_path_audios + audio_path).unsqueeze(0)
                 if torch.cuda.is_available() == False:
                     pass
                 else:
