@@ -74,8 +74,8 @@ def get_pretrained_model(
     """
     """
     prompter = Prompter(prompt_template)
-    tokenizer = LlamaTokenizer.from_pretrained(base_model)
-    model = LlamaForCausalLM.from_pretrained(base_model, device_map="auto") #, torch_dtype=torch.bfloat16
+    tokenizer = LlamaTokenizer.from_pretrained(model_name)
+    model = LlamaForCausalLM.from_pretrained(model_name, device_map="auto") #, torch_dtype=torch.bfloat16
     config = LoraConfig(
         r=8,
         lora_alpha=16,
@@ -85,11 +85,10 @@ def get_pretrained_model(
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, config)
-    temp, top_p, top_k = 0.1, 0.95, 500
     # change it to your model path, this is the GAMMA state 5 model trained 1 epoch as in paper results.
     eval_mdl_path = '/workspace/GAMA/GAMMA-data-models/checkpoint-1100/pytorch_model.bin' #location on singularity image of the bin model.
     state_dict = torch.load(eval_mdl_path, map_location='cpu')
-    msg = model.load_state_dict(state_dict, strict=False)
+    _ = model.load_state_dict(state_dict, strict=False)
 
     model.is_parallelizable = True
     model.model_parallel = True
@@ -127,17 +126,37 @@ def read_wavs(p_wav):
             break
     return wavs
 
-def create_something...prompt maybe(processor, wavs, texts):
-    """
-    Create a query for QWen model from a list of wave files and a list of text prompts.
 
-    """
+def load_audio(filename):
+    waveform, sr = torchaudio.load(filename)
+    if sr != 16000:
+        waveform = torchaudio.functional.resample(waveform, sr, 16000)
+        sr = 16000
+    waveform = waveform - waveform.mean()
+    fbank = torchaudio.compliance.kaldi.fbank(waveform, htk_compat=True, sample_frequency=sr,
+                                              use_energy=False, window_type='hanning',
+                                              num_mel_bins=128, dither=0.0, frame_shift=10)
+    target_length = 1024
+    n_frames = fbank.shape[0]
+    p = target_length - n_frames
+    if p > 0:
+        m = torch.nn.ZeroPad2d((0, 0, 0, p))
+        fbank = m(fbank)
+    elif p < 0:
+        fbank = fbank[0:target_length, :]
+    # normalize the fbank
+    fbank = (fbank + 5.081) / 4.4849
+    return fbank
+
+
 def main():
     args = parse_args()
     set_random_seed(args.seed)
 
     model_name = '/workspace/GAMA/GAMMA-data-models/fs/nexus-projects/brain_project/Llama-2-7b-chat-hf-qformer'
     model, prompter, tokenizer = get_pretrained_model(model_name)
+    temp, top_p, top_k = 0.1, 0.95, 500
+
     
     for metafile in tqdm(args.p_dataset.glob('*/metadata.json')):
         metadata = json.load(metafile.open('r'))
@@ -158,31 +177,37 @@ def main():
             print('Skip {}'.format(taskname))
             continue
 
- 
-
         for pwav, example in tqdm(metadata.items()):
             p_wav = args.p_dataset / taskname / pwav
-            import pdb.pdb.set_trace()
             # Read all the wave files
             wavs = read_wavs(p_wav)
 
-            ### on the meantime I will process audio one by one but this is inneficient, yet I worry about GPU memory  ###
-            for audio in wavs:
-                cur_audio_input = load_audio(base_path_audios + audio_path).unsqueeze(0).to("cuda")
-            
+            if len(wavs) > 1:
+                print("Exiting script because len(wavs) > 1")
+                sys.exit()
 
+            ### on the meantime I will process audio one by one but this is inneficient, yet I worry about GPU memory  ###
+            cur_audio_input = load_audio(wavs[0]).unsqueeze(0).to("cuda")
             
-                generation_config = GenerationConfig(
-                do_sample=True,
-                temperature=temp,
-                top_p=top_p,
-                top_k=top_k,
-                repetition_penalty=1.1,
-                max_new_tokens=400,
-                bos_token_id=model.config.bos_token_id,
-                eos_token_id=model.config.eos_token_id,
-                pad_token_id=model.config.pad_token_id,
-                num_return_sequences=1
+            if 'text' in example:
+                example['instruction'] = 'The text is: {}\n{}'.format(example['text'], example['instruction'])
+            
+            
+            prompt = prompter.generate_prompt(example['instruction'], None)
+            inputs = tokenizer(prompt, return_tensors="pt")
+            input_ids = inputs["input_ids"].to("cuda")
+
+            generation_config = GenerationConfig(
+            do_sample=True,
+            temperature=temp,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=1.1,
+            max_new_tokens=400,
+            bos_token_id=model.config.bos_token_id,
+            eos_token_id=model.config.eos_token_id,
+            pad_token_id=model.config.pad_token_id,
+            num_return_sequences=1
             )
 
             # Without streaming
@@ -201,21 +226,9 @@ def main():
             output = output[len(prompt):]
 
 
-            # Create the query
-            text, audios = create_query(processor, wavs, [example['instruction']])
-            
-            # Generate the response
-            inputs = processor(text=text, audios=audios, sampling_rate=processor.feature_extractor.sampling_rate, return_tensors="pt", padding=True).to('cuda')
-            # inputs.input_ids = inputs.input_ids.to('cuda')
-
-            outputs = model.generate(**inputs, max_new_tokens=256)
-            outputs = outputs[:, inputs.input_ids.size(1):]
-
-            response = processor.batch_decode(outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-
             # Record response
-            metadata[pwav]['sllm_name'] = model_name
-            metadata[pwav]['sllm_response'] = response
+            metadata[pwav]['sllm_name'] = "GAMA_IT"
+            metadata[pwav]['sllm_response'] = output
 
         # Save the results
         json.dump(metadata, savefile.open('w'), indent=4, ensure_ascii=False)
