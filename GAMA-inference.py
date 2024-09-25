@@ -8,6 +8,7 @@ import numpy as np
 import fire
 import time
 import torchvision
+import pdb
 
 from peft import (
     LoraConfig,
@@ -57,6 +58,7 @@ def parse_args():
         p_results (Path): Path to the results folder. Required.
         p_save (Path): Path to the save folder. Required.
         seed (int): The random seed. Defaults to 33.
+        half (str): Which half of the tasks to process: "first" or "second". Defaults to "first".
 
     Returns:
         argparse.Namespace: The parsed arguments.
@@ -65,6 +67,8 @@ def parse_args():
     parser.add_argument('--p_dataset', type=Path, default='/livingrooms/wcchen/Dynamic_Datasets/')
     parser.add_argument('--p_save', type=Path, required=True)
     parser.add_argument('--seed', type=int, default=33)
+    parser.add_argument('--half', type=str, choices=["first", "second"], default="first")
+
     return parser.parse_args()
 
 def get_pretrained_model(
@@ -127,6 +131,46 @@ def read_wavs(p_wav):
     return wavs
 
 
+def glue_audios_into_one(wavs):
+
+    SAMPLING_RATE = 16000
+    all_audios = []
+    for filename in wavs:
+        waveform, sr = torchaudio.load(filename)
+        if sr != 16000:
+            waveform = torchaudio.functional.resample(waveform, sr, 16000)
+            sr = 16000
+
+        all_audios.append(waveform)
+        # adding 0.5 seconds of silence between each audio
+        all_audios.append(torch.zeros(int(0.5 * SAMPLING_RATE)))
+    # Flatten all tensors to 1D
+    flattened_wavs = [t.flatten() for t in all_audios]
+
+    # Concatenate along the last dimension (dim=0)
+    all_audios = torch.cat(flattened_wavs, dim=0).unsqueeze(0)
+        
+        
+    all_audios = all_audios - all_audios.mean()
+
+    fbank = torchaudio.compliance.kaldi.fbank(all_audios, htk_compat=True, sample_frequency=sr,
+                                            use_energy=False, window_type='hanning',
+                                            num_mel_bins=128, dither=0.0, frame_shift=10)
+    
+    
+    target_length = 1024
+    n_frames = fbank.shape[0]
+    p = target_length - n_frames
+    if p > 0:
+        m = torch.nn.ZeroPad2d((0, 0, 0, p))
+        fbank = m(fbank)
+    elif p < 0:
+        fbank = fbank[0:target_length, :]
+    # normalize the fbank
+    fbank = (fbank + 5.081) / 4.4849
+
+    return fbank
+
 def load_audio(filename):
     waveform, sr = torchaudio.load(filename)
     if sr != 16000:
@@ -157,8 +201,19 @@ def main():
     model, prompter, tokenizer = get_pretrained_model(model_name)
     temp, top_p, top_k = 0.1, 0.95, 500
 
+    # Gather all tasks (folders) containing metadata.json files
+    all_tasks = list(args.p_dataset.glob('*/metadata.json'))
+
+    # Split tasks into two halves
+    midpoint = len(all_tasks) // 2
+
+    if args.half == "first":
+        selected_tasks = all_tasks[:midpoint]
+    else:
+        selected_tasks = all_tasks[midpoint:]
+
     
-    for metafile in tqdm(args.p_dataset.glob('*/metadata.json')):
+    for metafile in tqdm(selected_tasks):
         metadata = json.load(metafile.open('r'))
         taskname = metafile.parent.name
         print('Processing {}'.format(taskname))
@@ -167,15 +222,17 @@ def main():
         savefile.parent.mkdir(parents=True, exist_ok=True)
 
         if savefile.exists():
+            print('Skip {} because task already done'.format(taskname))
             continue
 
         
         if taskname in [
             # 'PhonologicalFeatureClassification_VoxAngeles-Phone',
-            'Emergency_traffic_detection_ETD',
+            'Emergency_traffic_detection_ETD', 'NBestCorrection_Librispeech-TestOther',
         ]:
             print('Skip {}'.format(taskname))
             continue
+        
 
         for pwav, example in tqdm(metadata.items()):
             p_wav = args.p_dataset / taskname / pwav
@@ -183,11 +240,10 @@ def main():
             wavs = read_wavs(p_wav)
 
             if len(wavs) > 1:
-                print("Exiting script because len(wavs) > 1")
-                sys.exit()
-
-            ### on the meantime I will process audio one by one but this is inneficient, yet I worry about GPU memory  ###
-            cur_audio_input = load_audio(wavs[0]).unsqueeze(0).to("cuda")
+                cur_audio_input = glue_audios_into_one(wavs).unsqueeze(0).to("cuda")
+            else:
+                ### on the meantime I will process audio one by one but this is inneficient, yet I worry about GPU memory  ###
+                cur_audio_input = load_audio(wavs[0]).unsqueeze(0).to("cuda")
             
             if 'text' in example:
                 example['instruction'] = 'The text is: {}\n{}'.format(example['text'], example['instruction'])
